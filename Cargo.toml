@@ -1,0 +1,24 @@
+[package]
+name = "player"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glium = "0.32"
+ffmpeg-next = { version = "7.1", features = [
+    "format",
+    "codec",
+    "software-resampling",
+    "software-scaling",
+] }
+tracing = "0.1.4"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+url = "2"
+smol = "2.0.0"
+anyhow = "1.0"
+futures = "0.3.28"
+clap = { version = "4.5.11", features = ["derive"] }
+cpal = "0.15.2"
+ringbuf = "0.3.3"
+bytemuck = "1.13.1"
+
