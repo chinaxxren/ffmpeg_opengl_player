@@ -280,6 +280,8 @@ impl Renderer {
         );
 
         let mut target = self.display.draw();
+        let window_size = self.display.gl_window().window().inner_size();
+        println!("[Renderer] 当前窗口大小: {}x{}", window_size.width, window_size.height);
         target.clear_color(0.0, 0.0, 0.0, 1.0);
 
         let uniforms = uniform! {
