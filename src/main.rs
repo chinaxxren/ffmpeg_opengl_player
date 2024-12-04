@@ -2,16 +2,15 @@ extern crate ffmpeg_next as ffmpeg;
 use ffmpeg::format::Pixel;
 use ffmpeg::util::frame::Video;
 
+use glium::glutin::dpi::{LogicalSize, PhysicalSize};
 use glium::glutin::event::{ElementState, Event, KeyboardInput, VirtualKeyCode, WindowEvent};
 use glium::glutin::event_loop::{ControlFlow, EventLoop};
 use glium::glutin::window::WindowBuilder;
-use glium::glutin::dpi::LogicalSize;
 use glium::glutin::ContextBuilder;
-use glium::{implement_vertex, Display, Program, Surface, uniform};
-use glium::backend::glutin::DisplayCreationError;
-use glium::texture::{RawImage2d, Texture2d, UncompressedFloatFormat, MipmapsOption, ClientFormat};
-use glium::Rect;
+use glium::texture::{ClientFormat, MipmapsOption, RawImage2d, Texture2d, UncompressedFloatFormat};
 use glium::uniforms::MagnifySamplerFilter;
+use glium::Rect;
+use glium::{implement_vertex, uniform, Surface};
 
 use std::borrow::Cow;
 use std::sync::{mpsc, Arc, Mutex};
@@ -30,6 +29,13 @@ struct Vertex {
 }
 
 implement_vertex!(Vertex, position, tex_coords);
+
+#[derive(Copy, Clone, Debug)]
+enum ScaleMode {
+    Fit,     // 适应窗口，保持比例，可能有黑边
+    Fill,    // 填充窗口，保持比例，可能裁剪
+    Stretch, // 拉伸填充，可能变形
+}
 
 fn main() {
     // 创建带缓冲的通道，避免阻塞
@@ -62,56 +68,122 @@ fn main() {
     let window_builder = WindowBuilder::new()
         .with_title("视频播放器")
         .with_inner_size(LogicalSize::new(800, 600));
-    
+
     let context_builder = ContextBuilder::new();
     let display = glium::Display::new(window_builder, context_builder, &event_loop)
         .expect("Failed to create display");
 
     // 计算保持宽高比的顶点坐标
-    fn calculate_display_vertices(window_width: u32, window_height: u32, video_width: u32, video_height: u32) -> Vec<Vertex> {
-        // 计算视频宽高比
+    fn calculate_display_vertices(
+        window_width: u32,
+        window_height: u32,
+        video_width: u32,
+        video_height: u32,
+        mode: ScaleMode,
+    ) -> Vec<Vertex> {
         let video_aspect = video_width as f32 / video_height as f32;
         let window_aspect = window_width as f32 / window_height as f32;
 
-        // 计算实际显示尺寸，保持宽高比
-        let (display_width, display_height) = if window_aspect > video_aspect {
-            // 窗口较宽，以高度为基准
-            let height = 2.0;
-            let width = height * video_aspect;
-            (width, height)
-        } else {
-            // 窗口较高，以宽度为基准
-            let width = 2.0;
-            let height = width / video_aspect;
-            (width, height)
+        // 计算显示尺寸和纹理坐标
+        let (display_width, display_height, tex_coords) = match mode {
+            ScaleMode::Fit => {
+                // 适应窗口，保持比例，可能有黑边
+                if window_aspect > video_aspect {
+                    // 窗口较宽，以高度为基准
+                    let height = 2.0;
+                    let width = height * video_aspect;
+                    (
+                        width,
+                        height,
+                        [
+                            [0.0, 1.0], // 左下
+                            [1.0, 1.0], // 右下
+                            [1.0, 0.0], // 右上
+                            [0.0, 0.0], // 左上
+                        ],
+                    )
+                } else {
+                    // 窗口较高，以宽度为基准
+                    let width = 2.0;
+                    let height = width / video_aspect;
+                    (
+                        width,
+                        height,
+                        [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+                    )
+                }
+            }
+            ScaleMode::Fill => {
+                // 填充窗口，保持比例，可能裁剪
+                if window_aspect > video_aspect {
+                    // 窗口较宽，以宽度为基准
+                    let width = 2.0;
+                    let scale = window_aspect / video_aspect;
+                    let tex_height = 1.0 / scale;
+                    let tex_offset = (1.0 - tex_height) / 2.0;
+                    (
+                        width,
+                        width / window_aspect,
+                        [
+                            [0.0, 1.0 - tex_offset], // 左下
+                            [1.0, 1.0 - tex_offset], // 右下
+                            [1.0, tex_offset],       // 右上
+                            [0.0, tex_offset],       // 左上
+                        ],
+                    )
+                } else {
+                    // 窗口较高，以高度为基准
+                    let height = 2.0;
+                    let scale = video_aspect / window_aspect;
+                    let tex_width = 1.0 / scale;
+                    let tex_offset = (1.0 - tex_width) / 2.0;
+                    (
+                        height * window_aspect,
+                        height,
+                        [
+                            [tex_offset, 1.0],       // 左下
+                            [1.0 - tex_offset, 1.0], // 右下
+                            [1.0 - tex_offset, 0.0], // 右上
+                            [tex_offset, 0.0],       // 左上
+                        ],
+                    )
+                }
+            }
+            ScaleMode::Stretch => {
+                // 拉伸填充，可能变形
+                (2.0, 2.0, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
+            }
         };
 
         // 计算显示位置，使视频居中
         let x_offset = -display_width / 2.0;
         let y_offset = -display_height / 2.0;
 
+        // 创建顶点数组
         vec![
             Vertex {
                 position: [x_offset, y_offset],
-                tex_coords: [0.0, 1.0],
+                tex_coords: tex_coords[0],
             },
             Vertex {
                 position: [x_offset + display_width, y_offset],
-                tex_coords: [1.0, 1.0],
+                tex_coords: tex_coords[1],
             },
             Vertex {
                 position: [x_offset + display_width, y_offset + display_height],
-                tex_coords: [1.0, 0.0],
+                tex_coords: tex_coords[2],
             },
             Vertex {
                 position: [x_offset, y_offset + display_height],
-                tex_coords: [0.0, 0.0],
+                tex_coords: tex_coords[3],
             },
         ]
     }
 
     // 接收第一帧以获取视频尺寸
-    let first_frame = frame_receiver.recv().expect("Failed to receive first frame");
+    let first_frame = frame_receiver
+        .recv()
+        .expect("Failed to receive first frame");
     let frame_width = first_frame.width();
     let frame_height = first_frame.height();
     println!("Video dimensions: {}x{}", frame_width, frame_height);
@@ -123,6 +195,7 @@ fn main() {
             600,
             frame_width as u32,
             frame_height as u32,
+            ScaleMode::Fit,
         );
         glium::VertexBuffer::new(&display, &vertices).expect("Failed to create vertex buffer")
     };
@@ -143,35 +216,55 @@ fn main() {
             .expect("Failed to create shader program");
 
     // 创建纹理
-    let mut y_texture: Option<Texture2d> = Some(Texture2d::empty_with_format(
-        &display,
-        UncompressedFloatFormat::U8,
-        MipmapsOption::NoMipmap,
-        frame_width as u32,
-        frame_height as u32,
-    ).unwrap());
+    let mut y_texture: Option<Texture2d> = Some(
+        Texture2d::empty_with_format(
+            &display,
+            UncompressedFloatFormat::U8,
+            MipmapsOption::NoMipmap,
+            frame_width as u32,
+            frame_height as u32,
+        )
+        .unwrap(),
+    );
 
-    let mut u_texture: Option<Texture2d> = Some(Texture2d::empty_with_format(
-        &display,
-        UncompressedFloatFormat::U8,
-        MipmapsOption::NoMipmap,
-        frame_width as u32 / 2,
-        frame_height as u32 / 2,
-    ).unwrap());
+    let mut u_texture: Option<Texture2d> = Some(
+        Texture2d::empty_with_format(
+            &display,
+            UncompressedFloatFormat::U8,
+            MipmapsOption::NoMipmap,
+            frame_width as u32 / 2,
+            frame_height as u32 / 2,
+        )
+        .unwrap(),
+    );
 
-    let mut v_texture: Option<Texture2d> = Some(Texture2d::empty_with_format(
-        &display,
-        UncompressedFloatFormat::U8,
-        MipmapsOption::NoMipmap,
-        frame_width as u32 / 2,
-        frame_height as u32 / 2,
-    ).unwrap());
+    let mut v_texture: Option<Texture2d> = Some(
+        Texture2d::empty_with_format(
+            &display,
+            UncompressedFloatFormat::U8,
+            MipmapsOption::NoMipmap,
+            frame_width as u32 / 2,
+            frame_height as u32 / 2,
+        )
+        .unwrap(),
+    );
 
     // 处理第一帧
-    if let (Some(ref mut y), Some(ref mut u), Some(ref mut v)) = 
-       (y_texture.as_mut(), u_texture.as_mut(), v_texture.as_mut()) {
-        update_yuv_textures(&first_frame, y, u, v, frame_width as u32, frame_height as u32);
+    if let (Some(ref mut y), Some(ref mut u), Some(ref mut v)) =
+        (y_texture.as_mut(), u_texture.as_mut(), v_texture.as_mut())
+    {
+        update_yuv_textures(
+            &first_frame,
+            y,
+            u,
+            v,
+            frame_width as u32,
+            frame_height as u32,
+        );
     }
+
+    // 当前缩放模式
+    let mut current_scale_mode = ScaleMode::Fill;
 
     let mut frame_count = 0;
     let mut last_fps_update = Instant::now();
@@ -189,31 +282,11 @@ fn main() {
                 *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent {
-                event: WindowEvent::Resized(physical_size),
-                ..
-            } => {
-                // 处理窗口大小变化
-                println!("窗口大小变化: {}x{}", physical_size.width, physical_size.height);
-                
-                // 更新顶点缓冲以保持正确的宽高比
-                let vertices = calculate_display_vertices(
-                    physical_size.width,
-                    physical_size.height,
-                    frame_width as u32,
-                    frame_height as u32
-                );
-                vertex_buffer = glium::VertexBuffer::new(&display, &vertices)
-                    .expect("Failed to create vertex buffer");
-
-                // 通知显示系统窗口大小已更改
-                display.gl_window().window().request_redraw();
-            }
-            Event::WindowEvent {
                 event:
                     WindowEvent::KeyboardInput {
                         input:
                             KeyboardInput {
-                                virtual_keycode: Some(VirtualKeyCode::Space),
+                                virtual_keycode: Some(keycode),
                                 state: ElementState::Pressed,
                                 ..
                             },
@@ -221,9 +294,61 @@ fn main() {
                     },
                 ..
             } => {
-                if let Ok(mut player) = player.lock() {
-                    player.toggle_pause_playing();
+                match keycode {
+                    VirtualKeyCode::Space => {
+                        if let Ok(mut player) = player.lock() {
+                            player.toggle_pause_playing();
+                        }
+                    }
+                    VirtualKeyCode::M => {
+                        // 切换缩放模式
+                        current_scale_mode = match current_scale_mode {
+                            ScaleMode::Fit => ScaleMode::Fill,
+                            ScaleMode::Fill => ScaleMode::Stretch,
+                            ScaleMode::Stretch => ScaleMode::Fit,
+                        };
+                        println!("切换到缩放模式: {:?}", current_scale_mode);
+
+                        // 更新顶点缓冲
+                        let inner_size = display.gl_window().window().inner_size();
+                        let PhysicalSize { width, height } = inner_size;
+                        let vertices = calculate_display_vertices(
+                            width,
+                            height,
+                            frame_width as u32,
+                            frame_height as u32,
+                            current_scale_mode,
+                        );
+                        vertex_buffer = glium::VertexBuffer::new(&display, &vertices)
+                            .expect("Failed to create vertex buffer");
+                        display.gl_window().window().request_redraw();
+                    }
+                    _ => (),
                 }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(physical_size),
+                ..
+            } => {
+                // 处理窗口大小变化
+                println!(
+                    "窗口大小变化: {}x{}",
+                    physical_size.width, physical_size.height
+                );
+
+                // 更新顶点缓冲以保持正确的宽高比
+                let vertices = calculate_display_vertices(
+                    physical_size.width,
+                    physical_size.height,
+                    frame_width as u32,
+                    frame_height as u32,
+                    current_scale_mode,
+                );
+                vertex_buffer = glium::VertexBuffer::new(&display, &vertices)
+                    .expect("Failed to create vertex buffer");
+
+                // 通知显示系统窗口大小已更改
+                display.gl_window().window().request_redraw();
             }
             Event::MainEventsCleared => {
                 match frame_receiver.try_recv() {
@@ -231,19 +356,28 @@ fn main() {
                         frame_count += 1;
 
                         let new_frame = rescaler_for_frame(&frame);
-                        
+
                         // 更新纹理
-                        if let (Some(ref mut y), Some(ref mut u), Some(ref mut v)) = 
-                           (y_texture.as_mut(), u_texture.as_mut(), v_texture.as_mut()) {
-                            update_yuv_textures(&new_frame, y, u, v, frame_width as u32, frame_height as u32);
+                        if let (Some(ref mut y), Some(ref mut u), Some(ref mut v)) =
+                            (y_texture.as_mut(), u_texture.as_mut(), v_texture.as_mut())
+                        {
+                            update_yuv_textures(
+                                &new_frame,
+                                y,
+                                u,
+                                v,
+                                frame_width as u32,
+                                frame_height as u32,
+                            );
                         }
 
                         // 渲染
                         let mut target = display.draw();
                         target.clear_color(0.0, 0.0, 0.0, 1.0);
 
-                        if let (Some(ref y), Some(ref u), Some(ref v)) = 
-                           (y_texture.as_ref(), u_texture.as_ref(), v_texture.as_ref()) {
+                        if let (Some(ref y), Some(ref u), Some(ref v)) =
+                            (y_texture.as_ref(), u_texture.as_ref(), v_texture.as_ref())
+                        {
                             let uniforms = uniform! {
                                 y_tex: y.sampled().magnify_filter(MagnifySamplerFilter::Linear),
                                 u_tex: u.sampled().magnify_filter(MagnifySamplerFilter::Linear),
@@ -265,8 +399,9 @@ fn main() {
                     }
                     Err(mpsc::TryRecvError::Empty) => {
                         // 没有新帧时，继续显示上一帧
-                        if let (Some(ref y), Some(ref u), Some(ref v)) = 
-                           (y_texture.as_ref(), u_texture.as_ref(), v_texture.as_ref()) {
+                        if let (Some(ref y), Some(ref u), Some(ref v)) =
+                            (y_texture.as_ref(), u_texture.as_ref(), v_texture.as_ref())
+                        {
                             let mut target = display.draw();
                             target.clear_color(0.0, 0.0, 0.0, 1.0);
 
@@ -347,7 +482,14 @@ fn rescaler_for_frame(frame: &Video) -> Video {
     new_frame
 }
 
-fn update_yuv_textures(frame: &Video, y_texture: &mut Texture2d, u_texture: &mut Texture2d, v_texture: &mut Texture2d, width: u32, height: u32) {
+fn update_yuv_textures(
+    frame: &Video,
+    y_texture: &mut Texture2d,
+    u_texture: &mut Texture2d,
+    v_texture: &mut Texture2d,
+    width: u32,
+    height: u32,
+) {
     let y_data = frame.data(0);
     let u_data = frame.data(1);
     let v_data = frame.data(2);
