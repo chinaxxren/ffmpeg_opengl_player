@@ -42,7 +42,7 @@ impl VideoPlaybackThread {
                             smol::future::yield_now().await;
 
                             if let Err(e) = packet_decoder.send_packet(&packet) {
-                                // println!("发送视频包到解码器失败: {}", e);
+                                println!("发送视频包到解码器失败: {}", e);
                                 continue;
                             }
 

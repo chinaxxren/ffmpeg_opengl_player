@@ -12,7 +12,6 @@ use ffmpeg::util::frame::Video as VideoFrame;
 
 use glium::glutin::event::{Event, WindowEvent, KeyboardInput, ElementState, VirtualKeyCode};
 use glium::glutin::event_loop::{ControlFlow, EventLoop};
-use glium::glutin::window::WindowBuilder;
 
 use config::Config;
 use renderer::Renderer;
