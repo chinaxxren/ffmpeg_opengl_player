@@ -8,7 +8,6 @@ use glium::{
     },
     Display, Program, Surface, Texture2d, VertexBuffer, IndexBuffer,
     texture::{UncompressedFloatFormat, MipmapsOption, ClientFormat, RawImage2d},
-    uniforms::MagnifySamplerFilter,
     index::PrimitiveType,
     Rect,
 };
@@ -383,9 +382,5 @@ impl Renderer {
                 tex_coords: tex_coords[3],
             },
         ]
-    }
-
-    pub fn get_display(&self) -> &Display {
-        &self.display
     }
 }

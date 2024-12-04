@@ -1,7 +1,7 @@
 extern crate ffmpeg_next as ffmpeg;
 
 use futures::{future::OptionFuture, FutureExt};
-
+use ffmpeg::{format::Pixel, util::frame::Video as Video};
 use super::player::ControlCommand;
 
 pub struct VideoPlaybackThread {
@@ -13,7 +13,7 @@ pub struct VideoPlaybackThread {
 impl VideoPlaybackThread {
     pub fn start(
         stream: &ffmpeg::format::stream::Stream,
-        mut video_frame_callback: Box<dyn FnMut(&ffmpeg::util::frame::Video) + Send>,
+        mut video_frame_callback: Box<dyn FnMut(&Video) + Send>,
     ) -> Result<Self, anyhow::Error> {
         println!("视频线程启动 - 流信息: {}", stream.duration());
 
@@ -28,14 +28,15 @@ impl VideoPlaybackThread {
 
         let clock = StreamClock::new(stream);
 
-        let receiver_thread =
-            std::thread::Builder::new().name("video playback thread".into()).spawn(move || {
+        let receiver_thread = std::thread::Builder::new()
+            .name("video playback thread".into())
+            .spawn(move || {
                 smol::block_on(async move {
                     let packet_receiver_impl = async {
                         loop {
-                            let Ok(packet) = packet_receiver.recv().await else { 
+                            let Ok(packet) = packet_receiver.recv().await else {
                                 println!("视频包接收结束");
-                                break 
+                                break;
                             };
 
                             smol::future::yield_now().await;
@@ -45,18 +46,24 @@ impl VideoPlaybackThread {
                                 continue;
                             }
 
-                            let mut decoded_frame = ffmpeg::util::frame::Video::empty();
+                            let mut decoded_frame = Video::empty();
 
                             while packet_decoder.receive_frame(&mut decoded_frame).is_ok() {
-                                if let Some(delay) = clock.convert_pts_to_instant(decoded_frame.pts()) {
+                                if let Some(delay) =
+                                    clock.convert_pts_to_instant(decoded_frame.pts())
+                                {
                                     println!("视频帧延迟: {:?}", delay);
                                     smol::Timer::after(delay).await;
                                 }
 
-                                println!("解码视频帧 - PTS: {:?}, 格式: {:?}", 
+                                println!(
+                                    "解码视频帧 - PTS: {:?}, 格式: {:?}",
                                     decoded_frame.pts(),
-                                    decoded_frame.format());
-                                video_frame_callback(&decoded_frame);
+                                    decoded_frame.format()
+                                );
+
+                                let frame = Self::rescaler_for_frame(&decoded_frame);
+                                video_frame_callback(&frame);
                             }
                         }
                     }
@@ -66,8 +73,12 @@ impl VideoPlaybackThread {
                     let mut playing = true;
 
                     loop {
-                        let packet_receiver: OptionFuture<_> =
-                            if playing { Some(packet_receiver_impl.clone()) } else { None }.into();
+                        let packet_receiver: OptionFuture<_> = if playing {
+                            Some(packet_receiver_impl.clone())
+                        } else {
+                            None
+                        }
+                        .into();
 
                         smol::pin!(packet_receiver);
 
@@ -94,7 +105,11 @@ impl VideoPlaybackThread {
                 })
             })?;
 
-        Ok(Self { control_sender, packet_sender, receiver_thread: Some(receiver_thread) })
+        Ok(Self {
+            control_sender,
+            packet_sender,
+            receiver_thread: Some(receiver_thread),
+        })
     }
 
     pub async fn receive_packet(&self, packet: ffmpeg::codec::packet::packet::Packet) -> bool {
@@ -102,7 +117,7 @@ impl VideoPlaybackThread {
             Ok(_) => {
                 println!("视频包发送成功");
                 true
-            },
+            }
             Err(e) => {
                 println!("视频包发送失败: {}", e);
                 false
@@ -115,6 +130,25 @@ impl VideoPlaybackThread {
         if let Err(e) = self.control_sender.send(message).await {
             println!("发送控制消息失败: {}", e);
         }
+    }
+
+    // 缩放视频帧
+    pub fn rescaler_for_frame(frame: &Video) -> Video {
+        // 创建新的视频帧，保持原始尺寸和格式
+        let mut new_frame = Video::empty();
+        let mut context = ffmpeg_next::software::scaling::Context::get(
+            frame.format(),
+            frame.width(),
+            frame.height(),
+            Pixel::YUV420P,
+            frame.width(),  // 使用原始宽度
+            frame.height(), // 使用原始高度
+            ffmpeg::software::scaling::Flags::BILINEAR,
+        )
+        .unwrap();
+
+        context.run(&frame, &mut new_frame).unwrap();
+        new_frame
     }
 }
 
@@ -141,7 +175,10 @@ impl StreamClock {
 
         let start_time = std::time::Instant::now();
 
-        Self { time_base_seconds, start_time }
+        Self {
+            time_base_seconds,
+            start_time,
+        }
     }
 
     fn convert_pts_to_instant(&self, pts: Option<i64>) -> Option<std::time::Duration> {
