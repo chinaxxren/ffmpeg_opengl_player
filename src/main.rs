@@ -12,6 +12,7 @@ use ffmpeg::util::frame::Video as VideoFrame;
 
 use glium::glutin::event::{Event, WindowEvent, KeyboardInput, ElementState, VirtualKeyCode};
 use glium::glutin::event_loop::{ControlFlow, EventLoop};
+use glium::glutin::window::WindowBuilder;
 
 use config::Config;
 use renderer::Renderer;
@@ -69,6 +70,14 @@ fn main() {
     println!("[Main] 创建渲染器，窗口尺寸: {}x{}", config.window_width, config.window_height);
     let mut renderer = Renderer::new(&event_loop, &config, video_width, video_height);
 
+    // 手动设置窗口大小
+    renderer.handle_resize(glium::glutin::dpi::PhysicalSize::new(
+        config.window_width,
+        config.window_height
+    ));
+
+    println!("[Main] 初始窗口尺寸设置为: {}x{}", config.window_width, config.window_height);
+
     let mut frame_count = 0;
     let mut last_fps_update = Instant::now();
     let mut last_frame_time = Instant::now();
@@ -111,16 +120,11 @@ fn main() {
                 }
             }
             Event::WindowEvent {
-                event: WindowEvent::Resized(physical_size),
+                event: WindowEvent::Resized(new_size),
                 ..
             } => {
-                if physical_size.width == 0 || physical_size.height == 0 || 
-                   physical_size.width == u32::MAX || physical_size.height == u32::MAX {
-                    println!("[Main] 忽略无效的窗口尺寸: {}x{}", physical_size.width, physical_size.height);
-                    return;
-                }
-                println!("[Main] 窗口大小改变为: {}x{}", physical_size.width, physical_size.height);
-                renderer.handle_resize(physical_size);
+                println!("[Main] 窗口调整大小事件: {}x{}", new_size.width, new_size.height);
+                renderer.handle_resize(new_size);
             }
             Event::MainEventsCleared => {
                 let now = Instant::now();

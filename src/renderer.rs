@@ -126,15 +126,33 @@ impl Renderer {
     pub fn new(event_loop: &EventLoop<()>, config: &Config, frame_width: u32, frame_height: u32) -> Self {
         println!("[Renderer] 创建窗口，配置尺寸: {}x{}", config.window_width, config.window_height);
         
+        // 获取系统的缩放因子
+        let scale_factor = event_loop.primary_monitor().unwrap().scale_factor();
+        println!("[Renderer] 系统缩放因子: {}", scale_factor);
+        
+        // 根据缩放因子调整物理尺寸
+        let physical_width = (config.window_width as f64 * scale_factor) as u32;
+        let physical_height = (config.window_height as f64 * scale_factor) as u32;
+        
         let window_builder = WindowBuilder::new()
             .with_title(&config.window_title)
-            .with_inner_size(PhysicalSize::new(config.window_width, config.window_height));
+            .with_inner_size(PhysicalSize::new(
+                physical_width,
+                physical_height
+            ))
+            .with_resizable(true);
 
         let context_builder = ContextBuilder::new()
-            .with_vsync(true);
+            .with_vsync(true)
+            .with_multisampling(0)
+            .with_double_buffer(Some(true));
 
         let display = Display::new(window_builder, context_builder, event_loop)
             .expect("Failed to create display");
+
+        // 获取实际的缩放因子
+        let actual_scale_factor = display.gl_window().window().scale_factor();
+        println!("[Renderer] 实际显示器缩放因子: {}", actual_scale_factor);
 
         let vertex_shader_src = include_str!("shaders/vertex_shader.glsl");
         let fragment_shader_src = include_str!("shaders/fragment_shader.glsl");
@@ -161,7 +179,7 @@ impl Renderer {
         let front_buffer = YuvBuffer::new(frame_width, frame_height);
         let back_buffer = YuvBuffer::new(frame_width, frame_height);
 
-        Self {
+        let mut renderer = Self {
             display,
             program,
             vertex_buffer,
@@ -174,7 +192,12 @@ impl Renderer {
             frame_height,
             front_buffer,
             back_buffer,
-        }
+        };
+
+        // 初始化时立即更新顶点缓冲区
+        renderer.update_vertex_buffer();
+        
+        renderer
     }
 
     pub fn toggle_scale_mode(&mut self) {
@@ -187,23 +210,47 @@ impl Renderer {
     }
 
     pub fn handle_resize(&mut self, new_size: PhysicalSize<u32>) {
-        // 检查窗口大小是否有效
+        println!("[Renderer] 处理窗口调整大小: {}x{}", new_size.width, new_size.height);
+        
+        // 获取窗口的缩放因子，使用新的作用域
+        let scale_factor = {
+            let gl_window = self.display.gl_window();
+            gl_window.window().scale_factor()
+        };
+        
+        println!("[Renderer] 当前缩放因子: {}", scale_factor);
+        
+        // 转换为逻辑像素大小
+        let logical_size = new_size.to_logical::<f64>(scale_factor);
+        println!("[Renderer] 逻辑尺寸: {}x{}", logical_size.width, logical_size.height);
+
         if new_size.width == 0 || new_size.height == 0 || 
            new_size.width == u32::MAX || new_size.height == u32::MAX {
-            println!("无效的窗口大小: {}x{}", new_size.width, new_size.height);
+            println!("[Renderer] 忽略无效的窗口尺寸");
             return;
         }
-        println!("窗口大小变化: {}x{}", new_size.width, new_size.height);
+
         self.update_vertex_buffer();
     }
 
     pub fn update_vertex_buffer(&mut self) {
-        let window_size = self.display.gl_window().window().inner_size();
-        println!("[Renderer] 更新顶点缓冲区，当前窗口尺寸: {}x{}", window_size.width, window_size.height);
+        // 创建一个新的作用域来延长 gl_window 的生命周期
+        let (physical_size, scale_factor) = {
+            let gl_window = self.display.gl_window();
+            let window = gl_window.window();
+            (window.inner_size(), window.scale_factor())
+        };
+        
+        let logical_size = physical_size.to_logical::<f64>(scale_factor);
+
+        println!("[Renderer] 更新顶点缓冲区");
+        println!("[Renderer] 物理尺寸: {}x{}", physical_size.width, physical_size.height);
+        println!("[Renderer] 逻辑尺寸: {}x{}", logical_size.width, logical_size.height);
+        println!("[Renderer] 缩放因子: {}", scale_factor);
         
         let vertices = Self::calculate_display_vertices(
-            window_size.width,
-            window_size.height,
+            physical_size.width,
+            physical_size.height,
             self.frame_width,
             self.frame_height,
             self.scale_mode,
@@ -217,6 +264,13 @@ impl Renderer {
         let width = frame.width() as u32;
         let height = frame.height() as u32;
 
+        if self.frame_width != width || self.frame_height != height {
+            println!("[Renderer] 帧大小改变: {}x{} -> {}x{}", self.frame_width, self.frame_height, width, height);
+            self.frame_width = width;
+            self.frame_height = height;
+            self.update_vertex_buffer();
+        }
+
         // 在后台缓冲区中准备下一帧
         self.back_buffer.copy_from_frame(frame);
 
@@ -226,30 +280,6 @@ impl Renderer {
             self.back_buffer.u_buffer.len(),
             self.back_buffer.v_buffer.len()
         );
-
-        // 检查帧大小是否改变
-        if self.frame_width != width || self.frame_height != height {
-            println!("[Renderer] 帧大小改变: {}x{} -> {}x{}", self.frame_width, self.frame_height, width, height);
-            
-            self.frame_width = width;
-            self.frame_height = height;
-
-            // 更新顶点缓冲区
-            let vertices = [
-                Vertex { position: [-1.0, -1.0], tex_coords: [0.0, 1.0] },
-                Vertex { position: [ 1.0, -1.0], tex_coords: [1.0, 1.0] },
-                Vertex { position: [ 1.0,  1.0], tex_coords: [1.0, 0.0] },
-                Vertex { position: [-1.0,  1.0], tex_coords: [0.0, 0.0] },
-            ];
-
-            self.vertex_buffer = VertexBuffer::new(&self.display, &vertices)
-                .expect("Failed to create vertex buffer");
-
-            // 重新创建纹理
-            self.y_texture = None;
-            self.u_texture = None;
-            self.v_texture = None;
-        }
 
         // 创建或更新纹理
         if self.y_texture.is_none() {
@@ -368,90 +398,51 @@ impl Renderer {
         let video_aspect = video_width as f32 / video_height as f32;
         let window_aspect = window_width as f32 / window_height as f32;
 
-        println!("[Renderer] 计算显示顶点 - 视频: {}x{} (比例: {:.3}), 窗口: {}x{} (比例: {:.3}), 模式: {:?}",
-            video_width, video_height, video_aspect,
-            window_width, window_height, window_aspect,
-            mode);
+        println!("[Renderer] 计算显示顶点");
+        println!("[Renderer] 窗口尺寸: {}x{} (比例: {:.3})", window_width, window_height, window_aspect);
+        println!("[Renderer] 视频尺寸: {}x{} (比例: {:.3})", video_width, video_height, video_aspect);
+        println!("[Renderer] 缩放模式: {:?}", mode);
 
-        let (display_width, display_height, tex_coords) = match mode {
+        let (scale_x, scale_y) = match mode {
             ScaleMode::Fit => {
-                // Fit模式：完全按原比例显示，可能两边留黑
                 if window_aspect > video_aspect {
-                    // 窗口较宽，视频高度撑满，宽度按比例缩放（两侧留黑）
-                    let height = 2.0;
-                    let width = height * video_aspect;
-                    println!("[Renderer] Fit模式 - 保持原始比例 {:.3}, 两侧留黑", video_aspect);
-                    (width, height, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
+                    // 窗口较宽，以高度为基准进行缩放
+                    (video_aspect / window_aspect, 1.0)
                 } else {
-                    // 窗口较高，视频宽度撑满，高度按比例缩放（上下留黑）
-                    let width = 2.0;
-                    let height = width / video_aspect;
-                    println!("[Renderer] Fit模式 - 保持原始比例 {:.3}, 上下留黑", video_aspect);
-                    (width, height, [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]])
+                    // 窗口较高，以宽度为基准进行缩放
+                    (1.0, window_aspect / video_aspect)
                 }
-            }
+            },
             ScaleMode::Fill => {
-                // Fill模式：保持原比例占满窗口，超出部分裁剪
                 if window_aspect > video_aspect {
-                    // 窗口较宽，视频宽度撑满，超出高度裁剪
-                    let width = 2.0;
-                    let height = width / window_aspect;
-                    
-                    // 计算需要裁剪的比例
-                    let scale = width / (video_aspect * height);
-                    let crop = (scale - 1.0) / scale;
-                    let offset = crop / 2.0;
-                    
-                    println!("[Renderer] Fill模式 - 保持原始比例 {:.3}, 上下裁剪 {:.1}%", video_aspect, crop * 100.0);
-                    (width, height, [
-                        [0.0, 1.0 - offset],
-                        [1.0, 1.0 - offset],
-                        [1.0, offset],
-                        [0.0, offset]
-                    ])
+                    // 窗口较宽，以宽度为基准进行缩放
+                    (1.0, window_aspect / video_aspect)
                 } else {
-                    // 窗口较高，视频高度撑满，超出宽度裁剪
-                    let height = 2.0;
-                    let width = height * window_aspect;
-                    
-                    // 计算需要裁剪的比例
-                    let scale = height * video_aspect / width;
-                    let crop = (scale - 1.0) / scale;
-                    let offset = crop / 2.0;
-                    
-                    println!("[Renderer] Fill模式 - 保持原始比例 {:.3}, 两侧裁剪 {:.1}%", video_aspect, crop * 100.0);
-                    (width, height, [
-                        [offset, 1.0],
-                        [1.0 - offset, 1.0],
-                        [1.0 - offset, 0.0],
-                        [offset, 0.0]
-                    ])
+                    // 窗口较高，以高度为基准进行缩放
+                    (video_aspect / window_aspect, 1.0)
                 }
             }
         };
 
-        println!("[Renderer] 最终显示尺寸: {:.3} x {:.3}", display_width, display_height);
-
-        // 确保显示在窗口中心
-        let x_offset = -display_width / 2.0;
-        let y_offset = -display_height / 2.0;
+        println!("[Renderer] 缩放比例: ({:.3}, {:.3})", scale_x, scale_y);
+        println!("[Renderer] 最终显示尺寸: {:.3} x {:.3}", 2.0 * scale_x, 2.0 * scale_y);
 
         vec![
             Vertex {
-                position: [x_offset, y_offset],
-                tex_coords: tex_coords[0],
+                position: [-scale_x, -scale_y],
+                tex_coords: [0.0, 1.0],
             },
             Vertex {
-                position: [x_offset + display_width, y_offset],
-                tex_coords: tex_coords[1],
+                position: [scale_x, -scale_y],
+                tex_coords: [1.0, 1.0],
             },
             Vertex {
-                position: [x_offset + display_width, y_offset + display_height],
-                tex_coords: tex_coords[2],
+                position: [scale_x, scale_y],
+                tex_coords: [1.0, 0.0],
             },
             Vertex {
-                position: [x_offset, y_offset + display_height],
-                tex_coords: tex_coords[3],
+                position: [-scale_x, scale_y],
+                tex_coords: [0.0, 0.0],
             },
         ]
     }
