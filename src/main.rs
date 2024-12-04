@@ -61,10 +61,13 @@ fn main() {
     }
 
     let first_frame = first_frame.unwrap();
-    println!("[Main] 收到第一帧，尺寸: {}x{}", first_frame.width(), first_frame.height());
+    let video_width = first_frame.width() as u32;
+    let video_height = first_frame.height() as u32;
+    println!("[Main] 收到第一帧，视频尺寸: {}x{}", video_width, video_height);
 
-    println!("[Main] 创建渲染器");
-    let mut renderer = Renderer::new(&config, &event_loop, first_frame.width() as u32, first_frame.height() as u32);
+    // 使用配置中的窗口尺寸创建渲染器
+    println!("[Main] 创建渲染器，窗口尺寸: {}x{}", config.window_width, config.window_height);
+    let mut renderer = Renderer::new(&config, &event_loop, video_width, video_height);
 
     let mut frame_count = 0;
     let mut last_fps_update = Instant::now();
@@ -111,13 +114,12 @@ fn main() {
                 event: WindowEvent::Resized(physical_size),
                 ..
             } => {
-                // 检查窗口大小是否有效
                 if physical_size.width == 0 || physical_size.height == 0 || 
                    physical_size.width == u32::MAX || physical_size.height == u32::MAX {
-                    println!("[Main] 忽略无效的窗口大小: {:?}", physical_size);
+                    println!("[Main] 忽略无效的窗口尺寸: {}x{}", physical_size.width, physical_size.height);
                     return;
                 }
-                println!("[Main] 窗口大小改变: {:?}", physical_size);
+                println!("[Main] 窗口大小改变为: {}x{}", physical_size.width, physical_size.height);
                 renderer.handle_resize(physical_size);
             }
             Event::MainEventsCleared => {

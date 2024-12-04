@@ -35,14 +35,14 @@ impl VideoPlaybackThread {
                     let packet_receiver_impl = async {
                         loop {
                             let Ok(packet) = packet_receiver.recv().await else {
-                                println!("视频包接收结束");
+                                // println!("视频包接收结束");
                                 break;
                             };
 
                             smol::future::yield_now().await;
 
                             if let Err(e) = packet_decoder.send_packet(&packet) {
-                                println!("发送视频包到解码器失败: {}", e);
+                                // println!("发送视频包到解码器失败: {}", e);
                                 continue;
                             }
 
@@ -115,7 +115,7 @@ impl VideoPlaybackThread {
     pub async fn receive_packet(&self, packet: ffmpeg::codec::packet::packet::Packet) -> bool {
         match self.packet_sender.send(packet).await {
             Ok(_) => {
-                println!("视频包发送成功");
+                // println!("视频包发送成功");
                 true
             }
             Err(e) => {
