@@ -69,34 +69,42 @@ fn main() {
 
     // 计算保持宽高比的顶点坐标
     fn calculate_display_vertices(window_width: u32, window_height: u32, video_width: u32, video_height: u32) -> Vec<Vertex> {
-        let window_aspect = window_width as f32 / window_height as f32;
+        // 计算视频宽高比
         let video_aspect = video_width as f32 / video_height as f32;
-        
-        let (scale_x, scale_y) = if window_aspect > video_aspect {
-            // 窗口比视频更宽，高度将充满，两侧有黑边
-            let scale = video_aspect / window_aspect;
-            (scale, 1.0)
+        let window_aspect = window_width as f32 / window_height as f32;
+
+        // 计算实际显示尺寸，保持宽高比
+        let (display_width, display_height) = if window_aspect > video_aspect {
+            // 窗口较宽，以高度为基准
+            let height = 2.0;
+            let width = height * video_aspect;
+            (width, height)
         } else {
-            // 窗口比视频更高，宽度将充满，上下有黑边
-            let scale = window_aspect / video_aspect;
-            (1.0, scale)
+            // 窗口较高，以宽度为基准
+            let width = 2.0;
+            let height = width / video_aspect;
+            (width, height)
         };
+
+        // 计算显示位置，使视频居中
+        let x_offset = -display_width / 2.0;
+        let y_offset = -display_height / 2.0;
 
         vec![
             Vertex {
-                position: [-scale_x, -scale_y],
+                position: [x_offset, y_offset],
                 tex_coords: [0.0, 1.0],
             },
             Vertex {
-                position: [scale_x, -scale_y],
+                position: [x_offset + display_width, y_offset],
                 tex_coords: [1.0, 1.0],
             },
             Vertex {
-                position: [scale_x, scale_y],
+                position: [x_offset + display_width, y_offset + display_height],
                 tex_coords: [1.0, 0.0],
             },
             Vertex {
-                position: [-scale_x, scale_y],
+                position: [x_offset, y_offset + display_height],
                 tex_coords: [0.0, 0.0],
             },
         ]
@@ -187,17 +195,18 @@ fn main() {
                 // 处理窗口大小变化
                 println!("窗口大小变化: {}x{}", physical_size.width, physical_size.height);
                 
-                // 如果有视频帧，更新顶点缓冲以保持正确的宽高比
-                if let Some(ref y_tex) = y_texture {
-                    let vertices = calculate_display_vertices(
-                        physical_size.width,
-                        physical_size.height,
-                        y_tex.width(),
-                        y_tex.height()
-                    );
-                    vertex_buffer = glium::VertexBuffer::new(&display, &vertices)
-                        .expect("Failed to create vertex buffer");
-                }
+                // 更新顶点缓冲以保持正确的宽高比
+                let vertices = calculate_display_vertices(
+                    physical_size.width,
+                    physical_size.height,
+                    frame_width as u32,
+                    frame_height as u32
+                );
+                vertex_buffer = glium::VertexBuffer::new(&display, &vertices)
+                    .expect("Failed to create vertex buffer");
+
+                // 通知显示系统窗口大小已更改
+                display.gl_window().window().request_redraw();
             }
             Event::WindowEvent {
                 event:
