@@ -21,3 +21,6 @@ clap = { version = "4.5.11", features = ["derive"] }
 cpal = "0.15.2"
 ringbuf = "0.3.3"
 bytemuck = "1.13.1"
+rayon = "1.8"
+ndarray = "0.15.6"
+mempool = "0.3.0"

@@ -67,7 +67,7 @@ fn main() {
 
     // 使用配置中的窗口尺寸创建渲染器
     println!("[Main] 创建渲染器，窗口尺寸: {}x{}", config.window_width, config.window_height);
-    let mut renderer = Renderer::new(&config, &event_loop, video_width, video_height);
+    let mut renderer = Renderer::new(&event_loop, &config, video_width, video_height);
 
     let mut frame_count = 0;
     let mut last_fps_update = Instant::now();

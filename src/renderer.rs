@@ -15,6 +15,7 @@ use glium::{
 use ffmpeg_next::util::frame::Video as VideoFrame;
 use crate::config::Config;
 use std::borrow::Cow;
+use rayon::prelude::*;
 
 #[derive(Copy, Clone, Debug)]
 pub struct Vertex {
@@ -26,8 +27,84 @@ implement_vertex!(Vertex, position, tex_coords);
 
 #[derive(Copy, Clone, Debug)]
 pub enum ScaleMode {
-    Fit,     //按原视频比例显示，是竖屏的就显示出竖屏的，两边留黑
-    Fill,    //按照原比例拉伸占满整个播放器，但视频内容超出部分会被剪切
+    Fit,// 保持原始比例,两侧或者上下留黑
+    Fill,// 完全按原比例显示，，进行裁剪，画面全屏显示
+}
+
+struct YuvBuffer {
+    y_buffer: Vec<u8>,
+    u_buffer: Vec<u8>,
+    v_buffer: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+impl YuvBuffer {
+    fn new(width: u32, height: u32) -> Self {
+        Self {
+            y_buffer: vec![0; (width * height) as usize],
+            u_buffer: vec![0; ((width/2) * (height/2)) as usize],
+            v_buffer: vec![0; ((width/2) * (height/2)) as usize],
+            width,
+            height,
+        }
+    }
+
+    fn ensure_capacity(&mut self, width: u32, height: u32) {
+        if self.width != width || self.height != height {
+            self.width = width;
+            self.height = height;
+            self.y_buffer.resize((width * height) as usize, 0);
+            self.u_buffer.resize(((width/2) * (height/2)) as usize, 0);
+            self.v_buffer.resize(((width/2) * (height/2)) as usize, 0);
+        }
+    }
+
+    fn copy_from_frame(&mut self, frame: &VideoFrame) {
+        let width = frame.width() as u32;
+        let height = frame.height() as u32;
+        self.ensure_capacity(width, height);
+
+        let y_data = frame.data(0);
+        let u_data = frame.data(1);
+        let v_data = frame.data(2);
+
+        if y_data.is_empty() || u_data.is_empty() || v_data.is_empty() {
+            println!("[YuvBuffer] Warning: Missing YUV data");
+            return;
+        }
+
+        // Copy Y plane data
+        self.y_buffer.par_chunks_mut(width as usize)
+            .enumerate()
+            .for_each(|(i, row)| {
+                let src_offset = i * frame.stride(0);
+                if src_offset + width as usize <= y_data.len() {
+                    row.copy_from_slice(&y_data[src_offset..src_offset + width as usize]);
+                }
+            });
+
+        // Copy U plane data
+        let uv_width = width / 2;
+        self.u_buffer.par_chunks_mut(uv_width as usize)
+            .enumerate()
+            .for_each(|(i, row)| {
+                let src_offset = i * frame.stride(1);
+                if src_offset + uv_width as usize <= u_data.len() {
+                    row.copy_from_slice(&u_data[src_offset..src_offset + uv_width as usize]);
+                }
+            });
+
+        // Copy V plane data
+        self.v_buffer.par_chunks_mut(uv_width as usize)
+            .enumerate()
+            .for_each(|(i, row)| {
+                let src_offset = i * frame.stride(2);
+                if src_offset + uv_width as usize <= v_data.len() {
+                    row.copy_from_slice(&v_data[src_offset..src_offset + uv_width as usize]);
+                }
+            });
+    }
 }
 
 pub struct Renderer {
@@ -41,39 +118,39 @@ pub struct Renderer {
     scale_mode: ScaleMode,
     frame_width: u32,
     frame_height: u32,
+    front_buffer: YuvBuffer,
+    back_buffer: YuvBuffer,
 }
 
 impl Renderer {
-    pub fn new(config: &Config, event_loop: &EventLoop<()>, frame_width: u32, frame_height: u32) -> Self {
+    pub fn new(event_loop: &EventLoop<()>, config: &Config, frame_width: u32, frame_height: u32) -> Self {
         println!("[Renderer] 创建窗口，配置尺寸: {}x{}", config.window_width, config.window_height);
         
         let window_builder = WindowBuilder::new()
             .with_title(&config.window_title)
             .with_inner_size(PhysicalSize::new(config.window_width, config.window_height));
 
-        let context_builder = ContextBuilder::new();
+        let context_builder = ContextBuilder::new()
+            .with_vsync(true);
+
         let display = Display::new(window_builder, context_builder, event_loop)
             .expect("Failed to create display");
 
-        let window_size = display.gl_window().window().inner_size();
-        println!("[Renderer] 窗口实际尺寸: {}x{}", window_size.width, window_size.height);
-
-        let vertex_shader_src = include_str!("vertex_shader.glsl");
-        let fragment_shader_src = include_str!("fragment_shader.glsl");
+        let vertex_shader_src = include_str!("shaders/vertex_shader.glsl");
+        let fragment_shader_src = include_str!("shaders/fragment_shader.glsl");
 
         let program = Program::from_source(&display, vertex_shader_src, fragment_shader_src, None)
             .expect("Failed to create shader program");
 
-        let vertices = Self::calculate_display_vertices(
-            config.window_width,
-            config.window_height,
-            frame_width,
-            frame_height,
-            config.scale_mode,
-        );
-
-        let vertex_buffer = VertexBuffer::new(&display, &vertices)
-            .expect("Failed to create vertex buffer");
+        let vertex_buffer = VertexBuffer::new(
+            &display,
+            &[
+                Vertex { position: [-1.0, -1.0], tex_coords: [0.0, 1.0] },
+                Vertex { position: [ 1.0, -1.0], tex_coords: [1.0, 1.0] },
+                Vertex { position: [ 1.0,  1.0], tex_coords: [1.0, 0.0] },
+                Vertex { position: [-1.0,  1.0], tex_coords: [0.0, 0.0] },
+            ],
+        ).expect("Failed to create vertex buffer");
 
         let index_buffer = IndexBuffer::new(
             &display,
@@ -81,21 +158,22 @@ impl Renderer {
             &[0u16, 1, 2, 0, 2, 3],
         ).expect("Failed to create index buffer");
 
-        let y_texture = None;
-        let u_texture = None;
-        let v_texture = None;
+        let front_buffer = YuvBuffer::new(frame_width, frame_height);
+        let back_buffer = YuvBuffer::new(frame_width, frame_height);
 
         Self {
             display,
             program,
             vertex_buffer,
             index_buffer,
-            y_texture,
-            u_texture,
-            v_texture,
+            y_texture: None,
+            u_texture: None,
+            v_texture: None,
             scale_mode: config.scale_mode,
             frame_width,
             frame_height,
+            front_buffer,
+            back_buffer,
         }
     }
 
@@ -139,23 +217,43 @@ impl Renderer {
         let width = frame.width() as u32;
         let height = frame.height() as u32;
 
+        // 在后台缓冲区中准备下一帧
+        self.back_buffer.copy_from_frame(frame);
+
+        println!("[Renderer] Frame info - width: {}, height: {}, format: {:?}", width, height, frame.format());
+        println!("[Renderer] Buffer sizes - Y: {}, U: {}, V: {}", 
+            self.back_buffer.y_buffer.len(),
+            self.back_buffer.u_buffer.len(),
+            self.back_buffer.v_buffer.len()
+        );
+
         // 检查帧大小是否改变
-        if width != self.frame_width || height != self.frame_height {
+        if self.frame_width != width || self.frame_height != height {
             println!("[Renderer] 帧大小改变: {}x{} -> {}x{}", self.frame_width, self.frame_height, width, height);
             
             self.frame_width = width;
             self.frame_height = height;
 
-            // 重新创建纹理和顶点缓冲
+            // 更新顶点缓冲区
+            let vertices = [
+                Vertex { position: [-1.0, -1.0], tex_coords: [0.0, 1.0] },
+                Vertex { position: [ 1.0, -1.0], tex_coords: [1.0, 1.0] },
+                Vertex { position: [ 1.0,  1.0], tex_coords: [1.0, 0.0] },
+                Vertex { position: [-1.0,  1.0], tex_coords: [0.0, 0.0] },
+            ];
+
+            self.vertex_buffer = VertexBuffer::new(&self.display, &vertices)
+                .expect("Failed to create vertex buffer");
+
+            // 重新创建纹理
             self.y_texture = None;
             self.u_texture = None;
             self.v_texture = None;
-            self.update_vertex_buffer();
         }
 
         // 创建或更新纹理
         if self.y_texture.is_none() {
-            println!("[Renderer] 创建Y纹理 - {}x{}", width, height);
+            println!("[Renderer] Creating Y texture: {}x{}", width, height);
             self.y_texture = Some(Texture2d::empty_with_format(
                 &self.display,
                 UncompressedFloatFormat::U8,
@@ -166,7 +264,7 @@ impl Renderer {
         }
 
         if self.u_texture.is_none() {
-            println!("[Renderer] 创建U纹理 - {}x{}", width/2, height/2);
+            println!("[Renderer] Creating U texture: {}x{}", width/2, height/2);
             self.u_texture = Some(Texture2d::empty_with_format(
                 &self.display,
                 UncompressedFloatFormat::U8,
@@ -177,7 +275,7 @@ impl Renderer {
         }
 
         if self.v_texture.is_none() {
-            println!("[Renderer] 创建V纹理 - {}x{}", width/2, height/2);
+            println!("[Renderer] Creating V texture: {}x{}", width/2, height/2);
             self.v_texture = Some(Texture2d::empty_with_format(
                 &self.display,
                 UncompressedFloatFormat::U8,
@@ -187,107 +285,63 @@ impl Renderer {
             ).unwrap());
         }
 
-        let y = self.y_texture.as_ref().unwrap();
-        let u = self.u_texture.as_ref().unwrap();
-        let v = self.v_texture.as_ref().unwrap();
-
-        // 获取YUV数据和步长
-        let y_data = frame.data(0);
-        let u_data = frame.data(1);
-        let v_data = frame.data(2);
-
-        let y_stride = frame.stride(0);
-        let u_stride = frame.stride(1);
-        let v_stride = frame.stride(2);
-
-        println!("[Renderer] 帧信息:");
-        println!("  尺寸: {}x{}", width, height);
-        println!("  步长 - Y: {}, U: {}, V: {}", y_stride, u_stride, v_stride);
-
-        // 创建对齐的缓冲区
-        let mut y_buffer = vec![0u8; (width * height) as usize];
-        let mut u_buffer = vec![0u8; ((width/2) * (height/2)) as usize];
-        let mut v_buffer = vec![0u8; ((width/2) * (height/2)) as usize];
-
-        // 按行复制Y平面数据，处理步长对齐
-        for y in 0..height as usize {
-            let src_start = y * y_stride;
-            let dst_start = y * width as usize;
-            y_buffer[dst_start..dst_start + width as usize]
-                .copy_from_slice(&y_data[src_start..src_start + width as usize]);
+        // 确保缓冲区大小正确
+        if self.back_buffer.y_buffer.len() != (width * height) as usize ||
+           self.back_buffer.u_buffer.len() != ((width/2) * (height/2)) as usize ||
+           self.back_buffer.v_buffer.len() != ((width/2) * (height/2)) as usize {
+            println!("[Renderer] Warning: Buffer size mismatch");
+            println!("[Renderer] Expected - Y: {}, U/V: {}", 
+                width * height,
+                (width/2) * (height/2)
+            );
+            return;
         }
 
-        // 按行复制U平面数据，处理步长对齐
-        for y in 0..(height/2) as usize {
-            let src_start = y * u_stride;
-            let dst_start = y * (width/2) as usize;
-            u_buffer[dst_start..dst_start + (width/2) as usize]
-                .copy_from_slice(&u_data[src_start..src_start + (width/2) as usize]);
+        // 更新纹理数据
+        if let Some(ref texture) = self.y_texture {
+            texture.write(
+                Rect { left: 0, bottom: 0, width, height },
+                RawImage2d {
+                    data: Cow::Borrowed(&self.back_buffer.y_buffer),
+                    width,
+                    height,
+                    format: ClientFormat::U8,
+                },
+            );
         }
 
-        // 按行复制V平面数据，处理步长对齐
-        for y in 0..(height/2) as usize {
-            let src_start = y * v_stride;
-            let dst_start = y * (width/2) as usize;
-            v_buffer[dst_start..dst_start + (width/2) as usize]
-                .copy_from_slice(&v_data[src_start..src_start + (width/2) as usize]);
+        if let Some(ref texture) = self.u_texture {
+            texture.write(
+                Rect { left: 0, bottom: 0, width: width / 2, height: height / 2 },
+                RawImage2d {
+                    data: Cow::Borrowed(&self.back_buffer.u_buffer),
+                    width: width / 2,
+                    height: height / 2,
+                    format: ClientFormat::U8,
+                },
+            );
         }
 
-        // 更新纹理
-        y.write(
-            Rect {
-                left: 0,
-                bottom: 0,
-                width,
-                height,
-            },
-            RawImage2d {
-                data: Cow::Borrowed(&y_buffer),
-                width,
-                height,
-                format: ClientFormat::U8,
-            },
-        );
+        if let Some(ref texture) = self.v_texture {
+            texture.write(
+                Rect { left: 0, bottom: 0, width: width / 2, height: height / 2 },
+                RawImage2d {
+                    data: Cow::Borrowed(&self.back_buffer.v_buffer),
+                    width: width / 2,
+                    height: height / 2,
+                    format: ClientFormat::U8,
+                },
+            );
+        }
 
-        u.write(
-            Rect {
-                left: 0,
-                bottom: 0,
-                width: width / 2,
-                height: height / 2,
-            },
-            RawImage2d {
-                data: Cow::Borrowed(&u_buffer),
-                width: width / 2,
-                height: height / 2,
-                format: ClientFormat::U8,
-            },
-        );
-
-        v.write(
-            Rect {
-                left: 0,
-                bottom: 0,
-                width: width / 2,
-                height: height / 2,
-            },
-            RawImage2d {
-                data: Cow::Borrowed(&v_buffer),
-                width: width / 2,
-                height: height / 2,
-                format: ClientFormat::U8,
-            },
-        );
-
+        // 渲染到屏幕
         let mut target = self.display.draw();
-        let window_size = self.display.gl_window().window().inner_size();
-        println!("[Renderer] 当前窗口大小: {}x{}", window_size.width, window_size.height);
         target.clear_color(0.0, 0.0, 0.0, 1.0);
 
         let uniforms = uniform! {
-            y_tex: y.sampled(),
-            u_tex: u.sampled(),
-            v_tex: v.sampled(),
+            y_tex: self.y_texture.as_ref().unwrap(),
+            u_tex: self.u_texture.as_ref().unwrap(),
+            v_tex: self.v_texture.as_ref().unwrap(),
         };
 
         target.draw(
@@ -299,6 +353,9 @@ impl Renderer {
         ).unwrap();
 
         target.finish().unwrap();
+
+        // 交换前后缓冲区
+        std::mem::swap(&mut self.front_buffer, &mut self.back_buffer);
     }
 
     fn calculate_display_vertices(
