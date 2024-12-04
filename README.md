@@ -1,62 +1,101 @@
-# FFmpeg OpenGL Video Player - Development Summary
+# FFmpeg OpenGL Video Player Project Summary
 
-## Initial Issues
-- Window size mismatch on macOS (800x600 showing as 400x300)
-- Video aspect ratio distortion
-- HiDPI/Retina display scaling problems
+## Project Overview
+A video player implementation in Rust that combines FFmpeg for media decoding and OpenGL for rendering, with support for audio playback and HiDPI displays.
 
-## Solutions Implemented
+## Core Components
+
+### 1. Video Processing
+```rust
+mod video;
+// Handles video decoding using FFmpeg
+// Manages frame timing and synchronization
+// Supports YUV420P format
+```
+
+### 2. Audio Processing
+```rust
+mod audio;
+// Audio decoding and resampling
+// Real-time audio playback using CPAL
+// Buffer management for smooth playback
+```
+
+### 3. Renderer
+```rust
+mod renderer;
+// OpenGL-based rendering using glium
+// YUV to RGB conversion in shaders
+// Aspect ratio preservation
+// HiDPI display support
+```
+
+## Key Features
+
+### Video Playback
+- FFmpeg integration for video decoding
+- Support for various video formats
+- Frame synchronization
+- Aspect ratio preservation
+
+### Audio Playback
+- Real-time audio processing
+- Audio resampling support
+- Synchronized with video playback
+
+### Display
+- OpenGL-based rendering
+- HiDPI/Retina display support
+- Multiple scaling modes (Fit/Fill)
+- Proper aspect ratio handling
+
+## Technical Implementation
+
+### Project Structure
+```
+src/
+├── main.rs           # Application entry point
+├── config.rs         # Configuration management
+├── renderer.rs       # OpenGL rendering
+├── player.rs         # Playback control
+├── audio.rs          # Audio processing
+└── video.rs          # Video processing
+```
+
+### Dependencies
+- `ffmpeg-next`: Media decoding
+- `glium`: OpenGL wrapper
+- `cpal`: Audio playback
+- `glutin`: Window management
+- `rayon`: Parallel processing
+
+## Challenges Solved
 
 ### 1. HiDPI Support
-```rust
-// Get system scale factor
-let scale_factor = event_loop.primary_monitor().unwrap().scale_factor();
-// Calculate physical size
-let physical_width = (config.window_width as f64 * scale_factor) as u32;
-let physical_height = (config.window_height as f64 * scale_factor) as u32;
-```
+- Proper handling of physical vs logical pixels
+- Scale factor management for Retina displays
+- Correct window size initialization
 
-### 2. Aspect Ratio Preservation
-```rust
-let (scale_x, scale_y) = match mode {
-    ScaleMode::Fit => {
-        if window_aspect > video_aspect {
-            (video_aspect / window_aspect, 1.0)
-        } else {
-            (1.0, window_aspect / video_aspect)
-        }
-    },
-    // ... Fill mode implementation
-}
-```
-
-## Key Components Modified
-
-### Renderer
-- Added proper scale factor handling
-- Improved vertex calculation
-- Enhanced debug logging
-- Fixed window size initialization
-
-### Window Management
-- Proper physical vs logical pixel handling
-- Correct initial window size setting
-- Improved resize event handling
-
-## Debug Process
-1. Added comprehensive logging
-2. Identified scale factor issues
-3. Fixed aspect ratio calculations
-4. Verified window size handling
-
-## Final Results
-- Correct window size on Retina displays
+### 2. Video Rendering
+- Efficient YUV to RGB conversion
 - Proper aspect ratio maintenance
-- Smooth scaling behavior
-- Better debug information
+- Smooth playback performance
 
-## Lessons Learned
-1. macOS HiDPI handling requires special attention
-2. Importance of distinguishing between physical and logical pixels
-3. Value of comprehensive logging for debugging
-4. Proper aspect ratio calculations are crucial for video display
+### 3. Audio Synchronization
+- Real-time audio processing
+- Buffer management
+- Synchronization with video frames
+
+## Future Improvements
+1. Hardware acceleration support
+2. Additional video format support
+3. Enhanced playback controls
+4. Performance optimizations
+5. Cross-platform testing
+
+## Development Lessons
+1. Importance of proper HiDPI handling
+2. Complexity of media synchronization
+3. Value of efficient shader-based processing
+4. Significance of proper error handling
+5. Benefits of comprehensive logging
