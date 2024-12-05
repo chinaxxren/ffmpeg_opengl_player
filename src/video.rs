@@ -3,6 +3,8 @@ extern crate ffmpeg_next as ffmpeg;
 use futures::{future::OptionFuture, FutureExt};
 use ffmpeg::{format::Pixel, util::frame::Video as Video};
 use super::player::ControlCommand;
+use num_cpus;
+use tracing;
 
 pub struct VideoPlaybackThread {
     control_sender: smol::channel::Sender<ControlCommand>,
@@ -15,16 +17,27 @@ impl VideoPlaybackThread {
         stream: &ffmpeg::format::stream::Stream,
         mut video_frame_callback: Box<dyn FnMut(&Video) + Send>,
     ) -> Result<Self, anyhow::Error> {
-        println!("视频线程启动 - 流信息: {}", stream.duration());
+        tracing::info!("视频线程启动 - 流信息: {}", stream.duration());
 
         let (control_sender, control_receiver) = smol::channel::unbounded();
 
         let (packet_sender, packet_receiver) = smol::channel::bounded(128);
 
         let decoder_context = ffmpeg::codec::Context::from_parameters(stream.parameters())?;
-        let mut packet_decoder = decoder_context.decoder().video()?;
+        
+        let mut packet_decoder = {
+            let mut decoder = decoder_context.decoder().video()?;
+            
+            // 设置解码器参数以启用多线程
+            decoder.set_threading(ffmpeg::codec::threading::Config {
+                kind: ffmpeg::codec::threading::Type::Frame,
+                count: num_cpus::get() as usize,  // 使用所有可用的 CPU 核心，不需要类型转换
+            });
 
-        println!("视频解码器初始化完成 - {:?}", packet_decoder.format());
+            decoder
+        };
+
+        tracing::info!("视频解码器初始化完成 - {:?}", packet_decoder.format());
 
         let clock = StreamClock::new(stream);
 
@@ -35,14 +48,14 @@ impl VideoPlaybackThread {
                     let packet_receiver_impl = async {
                         loop {
                             let Ok(packet) = packet_receiver.recv().await else {
-                                // println!("视频包接收结束");
+                                tracing::debug!("视频包接收结束");
                                 break;
                             };
 
                             smol::future::yield_now().await;
 
                             if let Err(e) = packet_decoder.send_packet(&packet) {
-                                println!("发送视频包到解码器失败: {}", e);
+                                tracing::error!("发送视频包到解码器失败: {}", e);
                                 continue;
                             }
 
@@ -52,11 +65,11 @@ impl VideoPlaybackThread {
                                 if let Some(delay) =
                                     clock.convert_pts_to_instant(decoded_frame.pts())
                                 {
-                                    println!("视频帧延迟: {:?}", delay);
+                                    tracing::debug!("视频帧延迟: {:?}", delay);
                                     smol::Timer::after(delay).await;
                                 }
 
-                                println!(
+                                tracing::debug!(
                                     "解码视频帧 - PTS: {:?}, 格式: {:?}",
                                     decoded_frame.pts(),
                                     decoded_frame.format()
@@ -87,15 +100,15 @@ impl VideoPlaybackThread {
                             received_command = control_receiver.recv().fuse() => {
                                 match received_command {
                                     Ok(ControlCommand::Pause) => {
-                                        println!("视频播放暂停");
+                                        tracing::info!("视频播放暂停");
                                         playing = false;
                                     }
                                     Ok(ControlCommand::Play) => {
-                                        println!("视频播放开始");
+                                        tracing::info!("视频播放开始");
                                         playing = true;
                                     }
                                     Err(e) => {
-                                        println!("视频控制通道关闭,{}",e);
+                                        tracing::error!("视频控制通道关闭: {}", e);
                                         return;
                                     }
                                 }
@@ -115,20 +128,20 @@ impl VideoPlaybackThread {
     pub async fn receive_packet(&self, packet: ffmpeg::codec::packet::packet::Packet) -> bool {
         match self.packet_sender.send(packet).await {
             Ok(_) => {
-                // println!("视频包发送成功");
+                tracing::debug!("视频包发送成功");
                 true
             }
             Err(e) => {
-                println!("视频包发送失败: {}", e);
+                tracing::error!("视频包发送失败: {}", e);
                 false
             }
         }
     }
 
     pub async fn send_control_message(&self, message: ControlCommand) {
-        println!("发送控制消息: {:?}", message);
+        tracing::debug!("发送控制消息: {:?}", message);
         if let Err(e) = self.control_sender.send(message).await {
-            println!("发送控制消息失败: {}", e);
+            tracing::error!("发送控制消息失败: {}", e);
         }
     }
 
@@ -154,7 +167,7 @@ impl VideoPlaybackThread {
 
 impl Drop for VideoPlaybackThread {
     fn drop(&mut self) {
-        println!("VideoPlaybackThread drop");
+        tracing::info!("VideoPlaybackThread drop");
         self.control_sender.close();
         if let Some(receiver_join_handle) = self.receiver_thread.take() {
             receiver_join_handle.join().unwrap();

@@ -21,18 +21,28 @@ const TARGET_FPS: u32 = 30;
 const FRAME_DURATION: Duration = Duration::from_micros((1_000_000f32 / TARGET_FPS as f32) as u64);
 
 fn main() {
-    println!("[Main] 程序启动");
+    // 初始化日志系统
+    tracing_subscriber::fmt()
+        .with_env_filter("info")
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_target(false)
+        .init();
+
+    tracing::info!("程序启动");
 
     let config = Config::default();
 
-    println!("[Main] 创建事件循环");
+    tracing::info!("创建事件循环");
     let event_loop = EventLoop::new();
 
     // 创建一个帧缓冲区来存储最新的视频帧
     let frame_buffer = Arc::new(Mutex::new(None::<VideoFrame>));
     let frame_buffer_clone = frame_buffer.clone();
 
-    println!("[Main] 创建播放器");
+    tracing::info!("创建播放器");
     let player = Player::start(
         config.video_path.clone(),
         Box::new(move |frame: &VideoFrame| {
@@ -41,14 +51,14 @@ fn main() {
             }
         }),
         Box::new(|playing| {
-            println!("[Player] 播放状态改变: {}", if playing { "播放" } else { "暂停" });
+            tracing::info!("播放状态改变: {}", if playing { "播放" } else { "暂停" });
         }),
     ).expect("Failed to start player");
 
     let player = Arc::new(Mutex::new(player));
 
     // 等待第一帧
-    println!("[Main] 等待第一帧");
+    tracing::info!("等待第一帧");
     let mut first_frame = None;
     while first_frame.is_none() {
         if let Ok(buffer) = frame_buffer.lock() {
@@ -63,10 +73,10 @@ fn main() {
     let first_frame = first_frame.unwrap();
     let video_width = first_frame.width() as u32;
     let video_height = first_frame.height() as u32;
-    println!("[Main] 收到第一帧，视频尺寸: {}x{}", video_width, video_height);
+    tracing::info!("收到第一帧，视频尺寸: {}x{}", video_width, video_height);
 
     // 使用配置中的窗口尺寸创建渲染器
-    println!("[Main] 创建渲染器，窗口尺寸: {}x{}", config.window_width, config.window_height);
+    tracing::info!("创建渲染器，窗口尺寸: {}x{}", config.window_width, config.window_height);
     let mut renderer = Renderer::new(&event_loop, &config, video_width, video_height);
 
     // 手动设置窗口大小
@@ -75,13 +85,13 @@ fn main() {
         config.window_height
     ));
 
-    println!("[Main] 初始窗口尺寸设置为: {}x{}", config.window_width, config.window_height);
+    tracing::info!("初始窗口尺寸设置为: {}x{}", config.window_width, config.window_height);
 
     let mut frame_count = 0;
     let mut last_fps_update = Instant::now();
     let mut last_frame_time = Instant::now();
 
-    println!("[Main] 进入主事件循环");
+    tracing::info!("进入主事件循环");
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
 
@@ -90,7 +100,7 @@ fn main() {
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
-                println!("[Main] 接收到退出事件");
+                tracing::info!("接收到退出事件");
                 *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent {
@@ -106,13 +116,13 @@ fn main() {
             } => {
                 match keycode {
                     VirtualKeyCode::Space => {
-                        println!("[Main] 空格键按下，切换播放状态");
+                        tracing::info!("空格键按下，切换播放状态");
                         if let Ok(mut player) = player.lock() {
                             player.toggle_pause_playing();
                         }
                     }
                     VirtualKeyCode::M => {
-                        println!("[Main] M键按下，切换缩放模式");
+                        tracing::info!("M键按下，切换缩放模式");
                         renderer.toggle_scale_mode();
                     }
                     _ => (),
@@ -122,7 +132,7 @@ fn main() {
                 event: WindowEvent::Resized(new_size),
                 ..
             } => {
-                println!("[Main] 窗口调整大小事件: {}x{}", new_size.width, new_size.height);
+                tracing::info!("窗口调整大小事件: {}x{}", new_size.width, new_size.height);
                 renderer.handle_resize(new_size);
             }
             Event::MainEventsCleared => {
@@ -137,7 +147,7 @@ fn main() {
                             last_frame_time = now;
 
                             if now.duration_since(last_fps_update) >= Duration::from_secs(1) {
-                                println!("[Main] FPS: {}", frame_count);
+                                tracing::info!("FPS: {}", frame_count);
                                 frame_count = 0;
                                 last_fps_update = now;
                             }

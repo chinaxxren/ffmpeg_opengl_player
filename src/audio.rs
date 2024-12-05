@@ -22,7 +22,7 @@ pub struct AudioPlaybackThread {
 
 impl AudioPlaybackThread {
     pub fn start(stream: &ffmpeg::format::stream::Stream) -> Result<Self, anyhow::Error> {
-        println!("音频线程启动 - 流信息: {}", stream.duration());
+        tracing::info!("音频线程启动 - 流信息: {}", stream.duration());
 
         let (control_sender, control_receiver) = smol::channel::unbounded();
 
@@ -31,16 +31,16 @@ impl AudioPlaybackThread {
         let decoder_context = ffmpeg::codec::Context::from_parameters(stream.parameters())?;
         let packet_decoder = decoder_context.decoder().audio()?;
 
-        println!("音频解码器初始化完成 - 格式: {:?}", packet_decoder.format());
+        tracing::info!("音频解码器初始化完成 - 格式: {:?}", packet_decoder.format());
 
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .expect("no output device available");
-        println!("音频输出设备: {:?}", device.name());
+        tracing::info!("音频输出设备: {:?}", device.name());
 
         let config = device.default_output_config().unwrap();
-        println!(
+        tracing::info!(
             "音频输出配置 - 采样率: {}, 通道: {}, 格式: {:?}",
             config.sample_rate().0,
             config.channels(),
@@ -56,11 +56,11 @@ impl AudioPlaybackThread {
                         2 => ffmpeg::util::channel_layout::ChannelLayout::STEREO,
                         _ => todo!(),
                     };
-                    println!("音频输出通道布局: {:?}", output_channel_layout);
+                    tracing::info!("音频输出通道布局: {:?}", output_channel_layout);
 
                     let mut ffmpeg_to_cpal_forwarder = match config.sample_format() {
                         cpal::SampleFormat::U8 => {
-                            println!("使用U8采样格式");
+                            tracing::info!("使用U8采样格式");
                             FFmpegToCPalForwarder::new::<u8>(
                                 config,
                                 &device,
@@ -73,7 +73,7 @@ impl AudioPlaybackThread {
                             )
                         }
                         cpal::SampleFormat::F32 => {
-                            println!("使用F32采样格式");
+                            tracing::info!("使用F32采样格式");
                             FFmpegToCPalForwarder::new::<f32>(
                                 config,
                                 &device,
@@ -95,7 +95,7 @@ impl AudioPlaybackThread {
                     let mut playing = true;
 
                     loop {
-                        println!("waiting for packet");
+                        tracing::debug!("等待音频包");
                         let packet_receiver: OptionFuture<_> = if playing {
                             Some(packet_receiver_impl.clone())
                         } else {
@@ -103,7 +103,7 @@ impl AudioPlaybackThread {
                         }
                         .into();
 
-                        println!("waiting for command");
+                        tracing::debug!("等待控制命令");
                         smol::pin!(packet_receiver);
 
                         futures::select! {
@@ -111,15 +111,15 @@ impl AudioPlaybackThread {
                             received_command = control_receiver.recv().fuse() => {
                                 match received_command {
                                     Ok(ControlCommand::Pause) => {
-                                        println!("音频播放暂停");
+                                        tracing::info!("音频播放暂停");
                                         playing = false;
                                     }
                                     Ok(ControlCommand::Play) => {
-                                        println!("音频播放开始");
+                                        tracing::info!("音频播放开始");
                                         playing = true;
                                     }
                                     Err(e) => {
-                                        println!("音频控制通道关闭 {}",e);
+                                        tracing::error!("音频控制通道关闭 {}",e);
                                         return;
                                     }
                                 }
@@ -139,27 +139,27 @@ impl AudioPlaybackThread {
     pub async fn receive_packet(&self, packet: ffmpeg::codec::packet::packet::Packet) -> bool {
         match self.packet_sender.send(packet).await {
             Ok(_) => {
-                // println!("音频包发送成功");
+                tracing::debug!("音频包发送成功");
                 true
             }
             Err(e) => {
-                println!("音频发送失败: {}", e);
+                tracing::error!("音频包发送失败: {}", e);
                 false
             }
         }
     }
 
     pub async fn send_control_message(&self, message: ControlCommand) {
-        println!("发送音频控制消息: {:?}", message);
+        tracing::debug!("发送音频控制消息: {:?}", message);
         if let Err(e) = self.control_sender.send(message).await {
-            println!("发送音频控制消息失败: {}", e);
+            tracing::error!("发送音频控制消息失败: {}", e);
         }
     }
 }
 
 impl Drop for AudioPlaybackThread {
     fn drop(&mut self) {
-        println!("AudioPlaybackThread drop");
+        tracing::info!("AudioPlaybackThread drop");
         self.control_sender.close();
         if let Some(receiver_join_handle) = self.receiver_thread.take() {
             receiver_join_handle.join().unwrap();
@@ -182,7 +182,7 @@ where
         &mut self,
         audio_frame: ffmpeg::frame::Audio,
     ) -> Pin<Box<dyn Future<Output = ()> + '_>> {
-        println!(
+        tracing::debug!(
             "转发音频帧 - 采样数: {}, 通道数: {}, 格式: {:?}",
             audio_frame.samples(),
             audio_frame.channels(),
@@ -234,7 +234,7 @@ impl FFmpegToCPalForwarder {
                     data[filled..].fill(T::EQUILIBRIUM);
                 },
                 move |err| {
-                    eprintln!("error feeding audio stream to cpal: {}", err);
+                    tracing::error!("error feeding audio stream to cpal: {}", err);
                 },
                 None,
             )
@@ -262,13 +262,12 @@ impl FFmpegToCPalForwarder {
     }
 
     async fn stream(&mut self) {
-        println!("音频播放线程启动");
+        tracing::info!("音频播放线程启动");
         loop {
             let Ok(packet) = self.packet_receiver.recv().await else {
                 break;
             };
 
-            // println!("音频包接收到");
             self.packet_decoder.send_packet(&packet).unwrap();
 
             let mut decoded_frame = ffmpeg::util::frame::Audio::empty();
@@ -277,15 +276,15 @@ impl FFmpegToCPalForwarder {
                 .receive_frame(&mut decoded_frame)
                 .is_ok()
             {
-                println!("音频解码完成");
+                tracing::debug!("音频解码完成");
                 let mut resampled_frame = ffmpeg::util::frame::Audio::empty();
-                println!("音频重采样");
+                tracing::debug!("音频重采样");
                 self.resampler
                     .run(&decoded_frame, &mut resampled_frame)
                     .unwrap();
-                println!("音频重采样完成");
+                tracing::debug!("音频重采样完成");
                 self.ffmpeg_to_cpal_pipe.forward(resampled_frame).await;
-                println!("音频重采样结果发送给CPAL");
+                tracing::debug!("音频重采样结果发送给CPAL");
             }
         }
     }
